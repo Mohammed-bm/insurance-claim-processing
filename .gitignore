@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Python specific
+__pycache__/
+*.pyc
+
+# Exclude all test files in the root directory
+test_*.py
+
+# Environments
+venv/
+.venv/
+
+# Specific helper scripts to ignore
+list_models.py
+quick_test.py
