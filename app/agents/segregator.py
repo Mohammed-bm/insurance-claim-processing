@@ -2,6 +2,7 @@ import ollama
 import json
 import re
 from typing import List, Dict
+from app.graph.state import ClaimState
 
 MODEL = "llama3.2:3b"
 
@@ -17,16 +18,36 @@ DOCUMENT_TYPES = [
     "other"
 ]
 
-BATCH_SIZE = 5
+BATCH_SIZE = 3
 
+def is_bank_document(text: str) -> bool:
+    """Quick pre-check for bank documents (no LLM needed)"""
+    bank_keywords = [
+        "CHEQUE", "CH-", "ACCOUNT NUMBER", "BANK NAME",
+        "IFSC", "SWIFT", "ROUTING NUMBER", "BANK DETAILS",
+        "Global Trust Bank", "Savings Account"
+    ]
+    
+    text_upper = text.upper()
+    matches = sum(1 for keyword in bank_keywords if keyword.upper() in text_upper)
+    
+    # If multiple bank keywords found, it's likely a bank document
+    return matches >= 2
 
-def classify_batch(batch: List[Dict]) -> Dict[str, str]:
+def classify_batch(batch: List[Dict], batch_start: int) -> Dict[str, str]:
 
     pages_block = ""
-    for page in batch:
-        pages_block += f"\n--- PAGE {page['page_number']} ---\n{page['text'][:600]}\n"
+    actual_pages = []
+    for i, page in enumerate(batch):
+        absolute_num = batch_start + i
+        actual_pages.append(absolute_num)
+        # Show ONLY absolute page numbers - no confusing relative numbers
+        pages_block += f"\n--- PAGE {absolute_num} ---\n{page['text'][:600]}\n"
 
     prompt = f"""You are a medical document classifier.
+
+The page numbers shown below (PAGE {batch_start}, PAGE {batch_start+1}, etc.) are the ACTUAL page numbers in the document.
+This batch contains pages: {[batch_start + i for i in range(len(batch))]}
 
 Classify each page into exactly one label.
 
@@ -35,8 +56,13 @@ claim_forms            → insurance claim forms, patient registration, consent 
                          appointment letters, referral letters, insurance verification,
                          medical history questionnaires, authorization forms
 
-cheque_or_bank_details → bank cheque, account number, IFSC, SWIFT code, routing number,
-                         any document with bank account details
+cheque_or_bank_details → financial documents containing:
+                         - Bank name (any bank name)
+                         - Account number (typically 10-18 digits)
+                         - Routing/IFSC code (alphanumeric code)
+                         - SWIFT code (8 or 11 characters)
+                         - Cheque number
+                         Look for keywords: "BANK", "ACCOUNT", "CHEQUE", "IFSC", "SWIFT", "ROUTING NUMBER"
 
 identity_document      → government ID card, Aadhaar, PAN, passport, driving licence
                          — must have ID number + date of birth
@@ -94,43 +120,71 @@ Pages:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        return {str(p["page_number"]): "other" for p in batch}
+        return {str(batch_start + i): "other" for i, p in enumerate(batch)}  # ✅ Correct name
 
-
-def segregate_pages(pages: List[Dict]) -> Dict[str, List[str]]:
-
-    # Normalize input
+def segregate_pages(pages: List[Dict]) -> tuple:
+    # Return both grouped texts AND page mapping
     normalized = []
-    for page in pages:
-        if isinstance(page, dict):
-            normalized.append({
-                "page_number": page.get("page_number", 0),
-                "text": page["text"]
-            })
-        else:
-            normalized.append({"page_number": 0, "text": page})
-
-    # Classify in batches
+    for idx, page in enumerate(pages):
+        actual_page_num = idx + 1
+        text = page["text"] if isinstance(page, dict) else page
+        normalized.append({
+            "page_number": actual_page_num,
+            "text": text
+        })
+    
+    # Classify
     all_labels = {}
     for i in range(0, len(normalized), BATCH_SIZE):
         batch = normalized[i:i + BATCH_SIZE]
-        print(f"  Classifying pages {batch[0]['page_number']} to {batch[-1]['page_number']}...")
-        batch_labels = classify_batch(batch)
+        batch_start = i + 1
+        batch_labels = classify_batch(batch, batch_start)
         all_labels.update(batch_labels)
-
-    print("  Final labels:", all_labels)
-
-    # Group texts by label
+    
+    # Group by type AND track page numbers
     grouped = {doc_type: [] for doc_type in DOCUMENT_TYPES}
-
+    page_mapping = {}  # ← NEW: Store page number -> document type
+    
     for page in normalized:
         page_num = str(page["page_number"])
-        label = all_labels.get(page_num, "other").strip().lower()
-        label = label.replace(" ", "_").replace("-", "_").strip(".,:")
-
-        if label not in DOCUMENT_TYPES:
-            label = "other"
-
+        label = all_labels.get(page_num, "other")
         grouped[label].append(page["text"])
+        page_mapping[page_num] = label  # ← Store the mapping!
+    
+    return grouped, page_mapping  # ← Return both
 
-    return grouped
+# ===== ADD THIS NODE WRAPPER FUNCTION =====
+def segregator_node(state: ClaimState) -> Dict:
+    print("\n🔍 [SEGREGATOR NODE] Starting page classification...")
+    
+    pages = state.get("pages", [])
+    
+    # Get both grouped texts AND page mapping
+    categorized, page_mapping = segregate_pages(pages)  # ← Now gets two things!
+    
+    # Extract the three core types
+    identity_pages = categorized.get("identity_document", [])
+    discharge_pages = categorized.get("discharge_summary", [])
+    bill_pages = categorized.get("itemized_bill", [])
+    
+    # Store other document types
+    additional_docs = {}
+    for doc_type in ["prescription", "investigation_report", "cash_receipt", 
+                     "claim_forms", "cheque_or_bank_details"]:
+        if categorized.get(doc_type):
+            additional_docs[doc_type] = categorized[doc_type]
+    
+    # Use the page_mapping instead of trying to match text!
+    page_classification = page_mapping  # ← DIRECT mapping, no matching needed!
+    
+    # ... rest of your code ...
+    
+    return {
+        "identity_pages": identity_pages,
+        "discharge_pages": discharge_pages,
+        "bill_pages": bill_pages,
+        "additional_documents": additional_docs,
+        "page_classification": page_classification,  # ← Now correct!
+        "total_pages": len(pages),
+        "warnings": warnings
+    } 

@@ -7,7 +7,7 @@ def extract_pages(file_bytes: bytes) -> List[Dict]:
     pages = []
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        for i, page in enumerate(pdf.pages):
+        for i, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
 
             pages.append({

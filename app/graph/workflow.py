@@ -1,5 +1,5 @@
 from langgraph.graph import StateGraph, END
-
+from datetime import datetime
 from app.graph.state import ClaimState
 from app.agents.segregator import segregate_pages
 from app.agents.id_agent import extract_identity
@@ -11,17 +11,13 @@ def segregator_node(state: ClaimState) -> dict:
     print("\n[NODE] Segregator running...")
 
     pages = state["pages"]
-    categorized = segregate_pages(pages)
+    categorized, page_mapping = segregate_pages(pages)
 
     identity_pages  = categorized.get("identity_document", [])
     discharge_pages = categorized.get("discharge_summary", [])
     bill_pages      = categorized.get("itemized_bill", [])
 
-    page_classification = {
-        doc_type: len(texts)
-        for doc_type, texts in categorized.items()
-        if texts
-    }
+    page_classification = page_mapping
 
     print(f"  Classification: {page_classification}")
 
@@ -80,16 +76,63 @@ def bill_agent_node(state: ClaimState) -> dict:
 
 def aggregator_node(state: ClaimState) -> dict:
     print("\n[NODE] Aggregator running...")
+    
+    # Calculate confidence scores
+    confidence_scores = state.get("confidence_scores", {})
+    
+    # If not already calculated, compute them
+    if not confidence_scores:
+        confidence_scores = {
+            "identity": 0.9 if state.get("identity_info") and state["identity_info"].get("patient_name") else 0.0,
+            "discharge": 0.9 if state.get("discharge_summary") and state["discharge_summary"].get("treating_doctor") else 0.0,
+            "bill": 0.9 if state.get("itemized_bill") and state["itemized_bill"].get("items") else 0.0,
+        }
+        
+        # Calculate overall
+        scores = [v for v in confidence_scores.values() if v > 0]
+        confidence_scores["overall"] = sum(scores) / len(scores) if scores else 0.0
 
+    # Build comprehensive final output
     final_output = {
-        "claim_id"           : state.get("claim_id"),
+        # Core fields
+        "claim_id": state.get("claim_id"),
+        "processing_timestamp": datetime.utcnow().isoformat() + "Z",
+        "processing_status": "completed",
+        
+        # Fixed core sections
+        "identity_information": state.get("identity_info"),
+        "discharge_summary": state.get("discharge_summary"),
+        "itemized_bill": state.get("itemized_bill"),
+        
+        # Flexible additional documents (from state.py)
+        "additional_documents": state.get("additional_documents", {}),
+        
+        # Page classification
         "page_classification": state.get("page_classification", {}),
-        "identity"           : state.get("identity_info"),
-        "discharge_summary"  : state.get("discharge_summary"),
-        "bill"               : state.get("itemized_bill"),
+        
+        # Metadata
+        "document_metadata": {
+            "total_pages_processed": state.get("total_pages", 0),
+            "processing_time_seconds": state.get("processing_time"),
+            "confidence_scores": confidence_scores
+        },
+        
+        # Warnings (from state.py)
+        "warnings": state.get("warnings", []),
+        
+        # Flexible fields (from state.py)
+        "flexible_fields": {
+            "raw_extractions": state.get("raw_extractions", {}),
+            "unexpected_data": state.get("unexpected_data", {})
+        }
     }
 
-    print("  Final output assembled.")
+    print("  Final output assembled with all fields.")
+    
+    # Also store in state
+    state["final_output"] = final_output
+    state["confidence_scores"] = confidence_scores
+    
     return {"final_output": final_output}
 
 
